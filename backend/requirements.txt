@@ -1,0 +1,12 @@
+flask
+flask-cors
+pandas
+pymongo
+pinecone
+sentence-transformers
+python-dotenv
+nltk
+scikit-learn
+joblib
+google-generativeai
+gunicorn
