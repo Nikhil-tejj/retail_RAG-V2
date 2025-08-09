@@ -55,7 +55,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-API_URL = "http://localhost:5000/api"  
+API_URL = "https://nikhil-01-rag.hf.space/api"  
 
 def search_products(query):
     """Send search query to backend API and return results."""
