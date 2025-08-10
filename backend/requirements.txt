@@ -9,3 +9,4 @@ joblib
 google-generativeai
 pandas
 numpy
+gunicorn
