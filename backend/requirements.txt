@@ -1,12 +1,11 @@
 flask
 flask-cors
-pandas
+python-dotenv
+certifi
 pymongo
 pinecone
 sentence-transformers
-python-dotenv
-nltk
-scikit-learn
 joblib
 google-generativeai
-gunicorn
+pandas
+numpy

@@ -15,4 +15,21 @@ build/
 .vscode/
 
 *.log
-EOL
+
+.ipynb_checkpoints/
+
+*.tmp
+*.temp
+temp/
+tmp/
+
+Thumbs.db
+Desktop.ini
+
+.Python
+pip-log.txt
+
+.coverage
+.pytest_cache/
+
+.streamlit/

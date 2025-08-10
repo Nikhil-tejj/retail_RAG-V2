@@ -2,9 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os, re, json
 import pandas as pd
-import nltk
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
+import numpy as np
 from dotenv import load_dotenv
 import certifi
 from pymongo import MongoClient
@@ -19,13 +17,16 @@ CORS(app)
 
 load_dotenv()
 
-nltk.download('stopwords', quiet=True)
-nltk.download('wordnet', quiet=True)
-nltk.download('punkt', quiet=True)
-
 MODEL_DIR = 'models'
-TFIDF_PATH = os.path.join(MODEL_DIR, 'tfidf_preprocessed.pkl')
-LR_PATH = os.path.join(MODEL_DIR, 'lr_preprocessed.pkl')
+LR_MODEL_PATH = os.path.join(MODEL_DIR, 'lr_embeddings.pkl')
+
+VALID_CATEGORIES = [
+    'Fragrance',
+    'Grocery & Gourmet Foods', 
+    'Hair Care',
+    'Other',
+    'Personal Care'
+]
 
 MONGO_URI = os.getenv('ATLAS_URI')
 mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
@@ -38,57 +39,40 @@ INDEX_NAME = 'prod-search'
 pinecone_index = pc.Index(INDEX_NAME)
 
 embed_model = SentenceTransformer('all-MiniLM-L6-v2')
+lr_model = joblib.load(LR_MODEL_PATH)
 
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
 def clean_text(text):
-    """Basic text cleaning"""
     text = str(text).lower()
     text = re.sub(r'https?://\S+|www\.\S+', '', text)
     text = re.sub(r'<.*?>', '', text)
-    text = re.sub(r'[^a-zA-Z\s]', ' ', text)
+    text = re.sub(r'[^\w\s-]', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-def remove_stopwords(text):
-    """Remove stopwords"""
-    stop_words = set(stopwords.words('english'))
-    tokens = nltk.word_tokenize(text)
-    tokens = [word for word in tokens if word.lower() not in stop_words]
-    return ' '.join(tokens)
-
-def lemmatize_text(text):
-    """Lemmatize text"""
-    lemmatizer = WordNetLemmatizer()
-    tokens = nltk.word_tokenize(text)
-    tokens = [lemmatizer.lemmatize(word) for word in tokens]
-    return ' '.join(tokens)
-
-def preprocess_text(text):
-    """Full preprocessing pipeline"""
-    text = clean_text(text)
-    text = remove_stopwords(text)
-    text = lemmatize_text(text)
-    return text
-
-def load_preprocessed_model():
-    """Load the preprocessed model components"""
-    tfidf = joblib.load(TFIDF_PATH)
-    lr = joblib.load(LR_PATH)
-    return tfidf, lr
+def preprocess_text_for_embeddings(text):
+    return clean_text(text)
 
 def predict_category(query: str) -> str:
-    """Predict category with preprocessing"""
-    processed_query = preprocess_text(query)
-    
-    tfidf, lr = load_preprocessed_model()
-    X = tfidf.transform([processed_query])
-    return lr.predict(X)[0]
+    processed_query = preprocess_text_for_embeddings(query)
+    query_embedding = embed_model.encode([processed_query])
+    prediction = lr_model.predict(query_embedding)[0]
+    return prediction
+
+def predict_with_confidence(query: str) -> tuple:
+    processed_query = preprocess_text_for_embeddings(query)
+    query_embedding = embed_model.encode([processed_query])
+    prediction = lr_model.predict(query_embedding)[0]
+    probabilities = lr_model.predict_proba(query_embedding)[0]
+    confidence = max(probabilities)
+    top_indices = np.argsort(probabilities)[-3:][::-1]
+    top_predictions = [(lr_model.classes_[i], probabilities[i]) for i in top_indices]
+    return prediction, confidence, top_predictions
 
 def parse_price_filter(query: str):
-    """Parse price filters from query"""
     price_filter = {}
     
     lower_patterns = [
@@ -150,7 +134,6 @@ def parse_price_filter(query: str):
     return price_filter if price_filter else None
 
 def search_products(query: str, top_k: int = 10):
-    """Search for products using RAG"""
     q_emb = embed_model.encode(query).tolist()
     res = pinecone_index.query(vector=q_emb, top_k=top_k, include_metadata=True)
     matches = res.get('matches', [])
@@ -191,8 +174,7 @@ def search_products(query: str, top_k: int = 10):
     
     return result
 
-def generate_response_gemini(query: str, products: list):
-    """Generate natural language response using Gemini"""
+def generate_response_gemini(query: str, products: list, category: str = None, confidence: float = None):
     if not products:
         return 'I could not find matching products right now.'
     
@@ -219,9 +201,16 @@ def generate_response_gemini(query: str, products: list):
         else:
             price_text = f"ranging from ₹{pr_min} to ₹{pr_max}"
     
+    confidence_text = ""
+    if confidence and confidence > 0.8:
+        confidence_text = "I'm confident these are exactly what you're looking for!"
+    elif confidence and confidence > 0.6:
+        confidence_text = "These should be good matches for your needs."
+    
     prompt = f"""
     You are a helpful e-commerce assistant. 
     The user searched for: "{query}"
+    Category identified: {category if category else 'General'}
     
     Here are the top results:
     {product_info[0]}
@@ -231,7 +220,7 @@ def generate_response_gemini(query: str, products: list):
     Write a natural-sounding response that:
     1. Acknowledges what they searched for
     2. Mentions we found {len(products)} products {brand_text} {price_text}
-    3. Convinces them these are good matches in 2-3 sentences
+    3. {confidence_text}
     4. Keep it under 100 words and friendly
     """
     
@@ -244,10 +233,8 @@ def generate_response_gemini(query: str, products: list):
         price_mention = f" under ₹{pr_max}" if pr_max else ""
         return f"I found {len(products)} great products matching your search{brand_mention}{price_mention}. These options should meet your needs perfectly."
 
-# API endpoints
 @app.route('/api/search', methods=['POST'])
 def search():
-    """Main search endpoint that combines category prediction and RAG search"""
     data = request.json
     query = data.get('query', '')
     
@@ -255,13 +242,23 @@ def search():
         return jsonify({'status': 'error', 'message': 'Query is required'}), 400
     
     try:
-        category = predict_category(query)
+        category, confidence, top_predictions = predict_with_confidence(query)
+        
+        if confidence < 0.5:
+            return jsonify({
+                'status': 'uncertain',
+                'message': 'I\'m not sure about the category. Here are my top guesses:',
+                'top_predictions': [{'category': cat, 'confidence': float(prob)} 
+                                  for cat, prob in top_predictions],
+                'category': category
+            })
         
         if category == "Other":
             return jsonify({
                 'status': 'not_found',
-                'message': 'We currently don’t carry items in that category. Check back soon!',
-                'category': category
+                'message': 'We currently don\'t carry items in that category. Check back soon!',
+                'category': category,
+                'confidence': float(confidence)
             })
         
         search_results = search_products(query, top_k=10)
@@ -281,30 +278,63 @@ def search():
                 }
                 serializable_products.append(product)
             
-            nl_response = generate_response_gemini(query, products)
+            nl_response = generate_response_gemini(query, products, category, confidence)
             
             return jsonify({
                 'status': 'success',
                 'category': category,
+                'confidence': float(confidence),
                 'products': serializable_products,
                 'price_filter': search_results.get('price_filter', {}),
-                'response': nl_response
+                'response': nl_response,
+                'top_predictions': [{'category': cat, 'confidence': float(prob)} 
+                                  for cat, prob in top_predictions[:3]]
             })
         else:
             return jsonify({
                 'status': 'not_found',
                 'message': search_results.get('message', 'No products found'),
-                'category': category
+                'category': category,
+                'confidence': float(confidence)
             })
             
     except Exception as e:
         print(f"Error processing search: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/api/predict-category', methods=['POST'])
+def predict_category_endpoint():
+    data = request.json
+    query = data.get('query', '')
+    
+    if not query:
+        return jsonify({'status': 'error', 'message': 'Query is required'}), 400
+    
+    try:
+        category, confidence, top_predictions = predict_with_confidence(query)
+        
+        return jsonify({
+            'status': 'success',
+            'query': query,
+            'predicted_category': category,
+            'confidence': float(confidence),
+            'top_predictions': [{'category': cat, 'confidence': float(prob)} 
+                              for cat, prob in top_predictions],
+            'valid_categories': VALID_CATEGORIES
+        })
+        
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
-    return jsonify({'status': 'healthy', 'timestamp': time.time()})
+    return jsonify({
+        'status': 'healthy', 
+        'timestamp': time.time(),
+        'valid_categories': VALID_CATEGORIES,
+        'model_type': 'sentence_transformers'
+    })
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 7860))
+    app.run(host='0.0.0.0', port=port)

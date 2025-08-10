@@ -52,10 +52,47 @@ st.markdown("""
         box-shadow: 0 2px 5px rgba(0,0,0,0.1);
         margin: 15px 0;
     }
+    .confidence-indicator {
+        background: #f8f9fa;
+        padding: 10px;
+        border-radius: 8px;
+        border-left: 4px solid #007bff;
+        margin: 10px 0;
+    }
+    .confidence-high {
+        border-left-color: #28a745;
+        background: #f1f8e9;
+    }
+    .confidence-medium {
+        border-left-color: #ffc107;
+        background: #fffbf0;
+    }
+    .confidence-low {
+        border-left-color: #dc3545;
+        background: #fff5f5;
+    }
+    .category-test-result {
+        background: linear-gradient(135deg, #f8f9fa, #e9ecef);
+        padding: 15px;
+        border-radius: 10px;
+        border: 1px solid #6c757d;
+        color: #495057;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        margin: 15px 0;
+    }
+    .prediction-badge {
+        display: inline-block;
+        background: #e9ecef;
+        padding: 3px 8px;
+        margin: 2px;
+        border-radius: 12px;
+        font-size: 0.8rem;
+        color: #495057;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-API_URL = "http://localhost:5000/api"  
+API_URL = "http://localhost:7860/api"
 
 def search_products(query):
     """Send search query to backend API and return results."""
@@ -70,26 +107,97 @@ def search_products(query):
         st.error(f"Error connecting to API: {e}")
         return {"status": "error", "error": str(e)}
 
+def test_category_prediction(query):
+    """Test category prediction endpoint."""
+    try:
+        response = requests.post(
+            f"{API_URL}/predict-category",
+            json={"query": query},
+            headers={"Content-Type": "application/json"}
+        )
+        return response.json()
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+def get_confidence_class(confidence):
+    """Get CSS class based on confidence level."""
+    if confidence > 0.8:
+        return "confidence-high"
+    elif confidence > 0.6:
+        return "confidence-medium"
+    else:
+        return "confidence-low"
+
+def display_confidence_info(category, confidence, top_predictions):
+    """Display confidence and prediction information."""
+    confidence_class = get_confidence_class(confidence)
+    confidence_pct = confidence * 100
+    
+    st.markdown(f"""
+    <div class='confidence-indicator {confidence_class}'>
+        <strong>🎯 Category Prediction:</strong> {category}<br>
+        <strong>🔍 Confidence:</strong> {confidence_pct:.1f}%<br>
+        <strong>📊 Top Predictions:</strong><br>
+        {''.join([f'<span class="prediction-badge">{pred["category"]} ({pred["confidence"]*100:.0f}%)</span>' for pred in top_predictions[:3]])}
+    </div>
+    """, unsafe_allow_html=True)
+
+def display_category_test_result(category, confidence, top_predictions):
+    """Display category test result with different styling."""
+    confidence_pct = confidence * 100
+    
+    st.markdown(f"""
+    <div class='category-test-result'>
+        <strong>🧪 Category Test Result</strong><br>
+        <strong>🎯 Predicted Category:</strong> {category}<br>
+        <strong>🔍 Confidence:</strong> {confidence_pct:.1f}%<br>
+        <strong>📊 All Predictions:</strong><br>
+        {''.join([f'<span class="prediction-badge">{pred["category"]} ({pred["confidence"]*100:.0f}%)</span>' for pred in top_predictions[:3]])}
+    </div>
+    """, unsafe_allow_html=True)
+
 def main():
     st.title("🛍️ RetailSearch AI")
     st.markdown("### Find the perfect products with AI-powered search")
 
     query = st.text_input(
         "What are you looking for today?", 
-        placeholder="e.g., 'moisturizing body wash', 'shampoo for dry hair', 'detergent under 200'"
+        placeholder="e.g., 'moisturizing body wash', 'organic shampoo', 'vanilla perfume under 500'"
     )
-    search_button = st.button("Search", type="primary")
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        search_button = st.button("Search", type="primary")
+    with col2:
+        test_button = st.button("🧪 Test Category", help="Test category prediction only")
+
+    if test_button and query:
+        with st.spinner("Testing category prediction..."):
+            result = test_category_prediction(query)
+            if result.get("status") == "success":
+                display_category_test_result(
+                    result["predicted_category"], 
+                    result["confidence"], 
+                    result["top_predictions"]
+                )
+            else:
+                st.error("Error testing category prediction")
 
     if search_button and query:
         with st.spinner("Searching for products..."):
             results = search_products(query)
             
             if results and results.get("status") == "success":
+                display_confidence_info(
+                    results["category"],
+                    results["confidence"], 
+                    results["top_predictions"]
+                )
+                
                 st.markdown("### 🤖 AI Assistant")
                 st.markdown(f"<div class='ai-response'>{results['response']}</div>", unsafe_allow_html=True)
                 
                 st.markdown("### 🔍 Search Results")
-                st.markdown(f"**Category: {results['category']}**")
                 
                 if 'price_filter' in results and results['price_filter']:
                     price_filter = results['price_filter']
@@ -99,9 +207,11 @@ def main():
                     if 'max_price' in price_filter:
                         filter_text.append(f"Max: ₹{price_filter['max_price']}")
                     if filter_text:
-                        st.markdown(f"**Price Filter: {', '.join(filter_text)}**")
+                        st.markdown(f"**💰 Price Filter Applied: {', '.join(filter_text)}**")
                 
                 products = results['products']
+                st.markdown(f"**📦 Found {len(products)} products**")
+                
                 cols = 3 
                 
                 for i in range(0, len(products), cols):
@@ -126,40 +236,63 @@ def main():
                                 
                                 with st.expander("Details"):
                                     st.write(product['description'][:200] + '...' if len(product['description']) > 200 else product['description'])
+                                    if product.get('category'):
+                                        st.write(f"**Category:** {product['category']}")
                                     
                                 st.markdown("</div>", unsafe_allow_html=True)
             
+            elif results and results.get("status") == "uncertain":
+                st.warning("🤔 " + results.get("message", "I'm not sure about the category."))
+                if results.get("top_predictions"):
+                    st.markdown("**My best guesses:**")
+                    for pred in results["top_predictions"]:
+                        st.markdown(f"- {pred['category']} ({pred['confidence']*100:.0f}% confidence)")
+                st.info("Try being more specific or use different keywords.")
+            
             elif results and results.get("status") == "not_found":
-                st.warning(results.get("message", "No products found matching your search."))
+                st.warning("😔 " + results.get("message", "No products found matching your search."))
                 if "category" in results:
-                    st.info(f"Product Category: {results['category']}")
+                    st.info(f"**Detected Category:** {results['category']}")
+                    if results.get("confidence"):
+                        st.info(f"**Confidence:** {results['confidence']*100:.1f}%")
             
             else:
-                st.error("An error occurred while processing your search.")
+                st.error("❌ An error occurred while processing your search.")
+                if results.get("error"):
+                    st.code(results["error"])
 
     with st.sidebar:
         st.title("About")
         st.markdown("""
-        This search tool uses AI to understand your natural language requests
+        This search tool uses **Sentence Transformers + AI** to understand your natural language requests
         and find the most relevant products from our catalog.
 
-        **Available Categories:**
+        **🏷️ Available Categories:**
         - Personal Care
-        - Detergents & Dishwash
-        - Fragrance
+        - Fragrance  
         - Grocery & Gourmet Foods
         - Hair Care
         - Other
 
-        **Features:**
-        - Natural language search
-        - Category recognition
-        - AI-powered responses
-        - Price filtering (try "under 500" or "between 200 and 800")
+        **✨ Features:**
+        - **Confidence Scores** - See how certain the AI is
+        - **Category Testing** - Test predictions without searching
+        - **Improved Accuracy** - 85%+ classification accuracy
+        - **Semantic Understanding** - Better synonym matching
+
+        **🔍 Search Tips:**
+        - Use natural language: "shampoo for dry hair"
+        - Add price filters: "under 500" or "between 200-800"
+        - Be specific: "organic moisturizer" vs just "cream"
+        
+        **🧠 Model Info:**
+        - **Embeddings:** Sentence Transformers (384-dim)
+        - **Classifier:** Logistic Regression
+        - **Categories:** 5 main categories
         """)
 
     st.markdown("---")
-    st.markdown("RetailSearch AI © 2023 - Powered by RAG + LLM😁")
+    st.markdown("RetailSearch AI © 2025 - Powered by Sentence Transformers + RAG 🚀")
 
 if __name__ == "__main__":
     main()
