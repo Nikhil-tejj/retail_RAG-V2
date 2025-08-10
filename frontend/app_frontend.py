@@ -92,7 +92,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+<<<<<<< HEAD
 API_URL = "http://localhost:7860/api"
+=======
+API_URL = "https://nikhil-01-rag.hf.space/api"  
+>>>>>>> dbc6d1af8d90cfa137ea6ddbdd4929977345d234
 
 def search_products(query):
     """Send search query to backend API and return results."""
